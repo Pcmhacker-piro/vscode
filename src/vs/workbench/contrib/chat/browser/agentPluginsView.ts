@@ -49,7 +49,7 @@ import { AbstractExtensionsListView } from '../../extensions/browser/extensionsV
 import { DefaultViewsContext, extensionsFilterSubMenu, IExtensionsWorkbenchService, SearchAgentPluginsContext } from '../../extensions/common/extensions.js';
 import { ChatContextKeys } from '../common/actions/chatContextKeys.js';
 import { AICustomizationManagementSection } from '../common/aiCustomizationWorkspaceService.js';
-import { IAgentPlugin, IAgentPluginService } from '../common/plugins/agentPluginService.js';
+import { IAgentPlugin, IAgentPluginService, matchesMarketplacePlugin } from '../common/plugins/agentPluginService.js';
 import { isContributionEnabled } from '../common/enablement.js';
 import { IPluginInstallService } from '../common/plugins/pluginInstallService.js';
 import { hasSourceChanged, IMarketplacePlugin, IPluginMarketplaceService } from '../common/plugins/pluginMarketplaceService.js';
@@ -64,7 +64,7 @@ import { CustomizationMarketplaceWelcome } from './aiCustomization/customization
 function installedPluginToItem(plugin: IAgentPlugin, labelService: ILabelService, outdated?: IObservable<IMarketplacePlugin | undefined>): IInstalledPluginItem {
 	const name = plugin.label;
 	const description = plugin.fromMarketplace?.description ?? labelService.getUriLabel(dirname(plugin.uri), { relative: true });
-	const marketplace = plugin.fromMarketplace?.marketplace;
+	const marketplace = plugin.fromMarketplace?.marketplace ?? plugin.copilotCliInstallation?.marketplace;
 	return { kind: AgentPluginItemKind.Installed, name, description, marketplace, plugin, outdated };
 }
 
@@ -77,6 +77,7 @@ function marketplacePluginToItem(plugin: IMarketplacePlugin): IMarketplacePlugin
 		source: plugin.source,
 		sourceDescriptor: plugin.sourceDescriptor,
 		marketplace: plugin.marketplace,
+		marketplaceName: plugin.marketplaceName,
 		marketplaceReference: plugin.marketplaceReference,
 		marketplaceType: plugin.marketplaceType,
 		readmeUri: plugin.readmeUri,
@@ -271,7 +272,7 @@ interface IAgentPluginsListViewOptions {
 export class AgentPluginsListView extends AbstractExtensionsListView<IAgentPluginItem> {
 
 	private readonly actionStore = this._register(new DisposableStore());
-	private readonly queryCts = new MutableDisposable<CancellationTokenSource>();
+	private readonly queryCts = this._register(new MutableDisposable<CancellationTokenSource>());
 	private list: WorkbenchPagedList<IAgentPluginItem> | null = null;
 	private listContainer: HTMLElement | null = null;
 	private welcomeContainer: HTMLElement | null = null;
@@ -446,6 +447,9 @@ export class AgentPluginsListView extends AbstractExtensionsListView<IAgentPlugi
 		const text = isRecommended ? '' : stripped.replace(/(?:^|\s)@installed(?:\s|$)/gi, ' ').trim().toLowerCase();
 
 		const allInstalled = this.queryInstalled();
+		const marketplacePlugins = this.listOptions.installedOnly || isInstalled
+			? this.pluginMarketplaceService.lastFetchedPlugins.get()
+			: await this.queryMarketplacePlugins();
 		let installed = allInstalled;
 		if (text) {
 			installed = installed.filter(p =>
@@ -459,19 +463,15 @@ export class AgentPluginsListView extends AbstractExtensionsListView<IAgentPlugi
 		if (isRecommended) {
 			const recommended = this.pluginMarketplaceService.recommendedPlugins.get();
 			installed = installed.filter(p => {
-				const marketplace = p.plugin.fromMarketplace;
-				if (!marketplace) {
-					return false;
-				}
-				const key = `${marketplace.name}@${marketplace.marketplace}`;
-				return recommended.has(key);
+				const marketplace = p.plugin.fromMarketplace ?? p.plugin.copilotCliInstallation;
+				return (marketplace && recommended.has(`${marketplace.name}@${marketplace.marketplace}`))
+					|| marketplacePlugins.some(m => recommended.has(`${m.name}@${m.marketplace}`) && matchesMarketplacePlugin(p.plugin, m));
 			});
 		}
 
 		let items: IAgentPluginItem[] = installed;
 
 		if (!this.listOptions.installedOnly && !isInstalled) {
-			const marketplacePlugins = await this.queryMarketplacePlugins();
 			let filteredMp = marketplacePlugins;
 
 			if (isRecommended) {

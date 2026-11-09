@@ -91,6 +91,15 @@ export interface IAgentPluginService {
 	readonly enablementModel: IEnablementModel;
 }
 
+export function matchesMarketplacePlugin(plugin: IAgentPlugin, marketplace: Pick<IMarketplacePlugin, 'name' | 'marketplace' | 'marketplaceName' | 'marketplaceReference'>): boolean {
+	if (plugin.fromMarketplace?.name === marketplace.name && plugin.fromMarketplace.marketplaceReference.canonicalId === marketplace.marketplaceReference.canonicalId) {
+		return true;
+	}
+	const installation = plugin.copilotCliInstallation;
+	return installation?.name === marketplace.name && !!installation.marketplace
+		&& (installation.marketplace === marketplace.marketplace || installation.marketplace === marketplace.marketplaceName);
+}
+
 /** Commits global runtime enablement before publishing the client's decision; workspace overrides stay local. */
 export async function setAgentPluginEnablement(plugin: IAgentPlugin, model: IEnablementModel, state: ContributionEnablementState): Promise<void> {
 	if (plugin.policyEnablement?.get() !== undefined || plugin.policyBlocked?.get()) {
