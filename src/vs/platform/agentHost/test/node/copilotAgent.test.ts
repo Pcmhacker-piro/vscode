@@ -5093,6 +5093,7 @@ suite('CopilotAgent', () => {
 			const client = new TestCopilotClient([]);
 			const { agent, instantiationService } = createTestAgentContext(disposables, { copilotClient: client, rootConfig: { [CopilotCliConfigKey.M365Enabled]: true } });
 			afterTest(() => disposeAgent(agent));
+			const initialResources = agent.getProtectedResources();
 			const connection = disposables.add(new CancellationTokenSource());
 			disposables.add(instantiationService.invokeFunction(accessor => accessor.get(IAgentHostClientConnectionService)).registerSource({
 				hasSeenClient: () => true,
@@ -5113,6 +5114,10 @@ suite('CopilotAgent', () => {
 				_meta: authenticationAccountMeta({ providerId: 'microsoft', accountId: 'selected' }),
 			}, connection.token);
 			assert.deepStrictEqual(await provider({ kind: 'identity', clientId: copilotEntraClientId, accountId: 'selected', reason: 'renewal' }, { isCancellationRequested: false, onCancellationRequested: Event.None }), { kind: 'identity', accountId: 'selected' });
+			const resourcesDuringAuthority = {
+				sharedHasMicrosoft: agent.getProtectedResources().some(resource => resource.resource === copilotEntraDiscoveryResource),
+				client: agent.getProtectedResources(undefined, 'client'),
+			};
 
 			const settled: string[] = [];
 			const disposed: string[] = [];
@@ -5135,7 +5140,10 @@ suite('CopilotAgent', () => {
 				connection.cancel();
 			}
 			await client.waitForCalls(() => client.stopCallCount === 1);
-			assert.deepStrictEqual({ settled, disposed, remaining: [...chatEntriesBySdkId(agent).keys()] }, { settled: ['shared'], disposed: ['shared'], remaining: ['scoped', 'virtual'] });
+			assert.deepStrictEqual({ settled, disposed, remaining: [...chatEntriesBySdkId(agent).keys()], resourcesDuringAuthority }, {
+				settled: ['shared'], disposed: ['shared'], remaining: ['scoped', 'virtual'],
+				resourcesDuringAuthority: { sharedHasMicrosoft: true, client: initialResources },
+			});
 		});
 	}
 
