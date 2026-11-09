@@ -10,19 +10,21 @@ import { Extensions as ConfigurationExtensions, IConfigurationRegistry } from '.
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { IProductService } from '../../../../platform/product/common/productService.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
-import { Extensions, IWorkbenchContributionsRegistry } from '../../../common/contributions.js';
+import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { IssueFormService } from './issueFormService.js';
 import { BrowserIssueService } from './issueService.js';
 import './issueTroubleshoot.js';
 import { IIssueFormService, IWorkbenchIssueService } from '../common/issue.js';
 import { BaseIssueContribution } from '../common/issue.contribution.js';
-import { LifecyclePhase } from '../../../services/lifecycle/common/lifecycle.js';
 import { BrowserScreenshotService, IScreenshotService } from './screenshotService.js';
 import { BrowserRecordingService, IRecordingService } from './recordingService.js';
 import { BrowserGitHubUploadService, IGitHubUploadService } from './githubUploadService.js';
 
 
 class WebIssueContribution extends BaseIssueContribution {
+
+	static readonly ID = 'workbench.contrib.webIssue';
+
 	constructor(@IProductService productService: IProductService, @IConfigurationService configurationService: IConfigurationService) {
 		super(productService, configurationService);
 		Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).registerConfiguration({
@@ -37,7 +39,7 @@ class WebIssueContribution extends BaseIssueContribution {
 	}
 }
 
-Registry.as<IWorkbenchContributionsRegistry>(Extensions.Workbench).registerWorkbenchContribution(WebIssueContribution, LifecyclePhase.Restored);
+registerWorkbenchContribution2(WebIssueContribution.ID, WebIssueContribution, WorkbenchPhase.AfterRestored);
 
 registerSingleton(IWorkbenchIssueService, BrowserIssueService, InstantiationType.Delayed);
 registerSingleton(IIssueFormService, IssueFormService, InstantiationType.Delayed);
