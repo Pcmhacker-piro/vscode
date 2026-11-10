@@ -136,7 +136,7 @@ import { IWorkspaceTrustEnablementService, IWorkspaceTrustManagementService, IWo
 import { AgentHostContribution, AgentHostSessionHandler } from '../../../browser/agentSessions/agentHost/agentHostChatContribution.js';
 import { IAgentHostFirstResponseEvent } from '../../../browser/agentSessions/agentHost/agentHostFirstResponseTelemetry.js';
 import type { IAgentHostFirstResponseDiagnostic } from '../../../../../../platform/agentHost/common/otel/agentHostTiming.js';
-import { AgentHostAuthTokenCache } from '../../../browser/agentSessions/agentHost/agentHostAuth.js';
+import { AgentHostAuthTokenCache, resolveAuthenticationInteractively } from '../../../browser/agentSessions/agentHost/agentHostAuth.js';
 import { AgentHostLanguageModelProvider } from '../../../browser/agentSessions/agentHost/agentHostLanguageModelProvider.js';
 import { AgentHostSessionListContribution } from '../../../browser/agentSessions/agentHost/agentHostSessionListContribution.js';
 import { IComputerUseSetupService } from '../../../browser/agentSessions/agentHost/computerUseSetup.js';
@@ -25191,6 +25191,14 @@ suite('AgentHostChatContribution', () => {
 			};
 		}
 
+		function authenticateInteractively(contribution: AgentHostContribution, services: Pick<ReturnType<typeof createTestServices>, 'instantiationService' | 'agentHostService'>, resource: ProtectedResourceMetadata): Promise<boolean> {
+			return services.instantiationService.invokeFunction(resolveAuthenticationInteractively, [resource], {
+				authTokenCache: (contribution as unknown as { readonly _authTokenCache: AgentHostAuthTokenCache })._authTokenCache,
+				logPrefix: '[Test]',
+				authenticate: request => services.agentHostService.authenticate(request),
+			});
+		}
+
 		test('does not re-authenticate when token unchanged across rootState changes', async () => {
 			const tokenRef = { current: 'tok-1' };
 			const { agentHostService } = createContribution(disposables, { authServiceOverride: tokenAuthService(tokenRef) });
@@ -25273,7 +25281,7 @@ suite('AgentHostChatContribution', () => {
 			}]);
 		});
 
-		test('resends the current token once for duplicate expired authentication notifications without prompting', async () => {
+		test('coalesces duplicate expired authentication notifications and forwards a fresh replacement without prompting', async () => {
 			const tokenRef = { current: 'tok-1' };
 			const { instantiationService, agentHostService, commandService } = createTestServices(disposables, undefined, tokenAuthService(tokenRef));
 			disposables.add(instantiationService.createInstance(AgentHostContribution));
@@ -25286,6 +25294,10 @@ suite('AgentHostChatContribution', () => {
 				scopes_supported: ['session:read'],
 			};
 
+			agentHostService.fireNotification(authRequiredNotification(sessionResource, AuthRequiredReason.Required));
+			await timeout(0);
+			agentHostService.authenticateCalls.length = 0;
+			tokenRef.current = 'tok-2';
 			agentHostService.fireNotification(authRequiredNotification(sessionResource, AuthRequiredReason.Expired));
 			agentHostService.fireNotification(authRequiredNotification(sessionResource, AuthRequiredReason.Expired));
 			await timeout(0);
@@ -25298,26 +25310,33 @@ suite('AgentHostChatContribution', () => {
 				authenticateCalls: [{
 					resource: 'https://api.github.com/session',
 					scopes: ['session:read'],
-					token: 'tok-1',
+					token: 'tok-2',
 				}],
 			});
 		});
 
-		test('prompts once and forwards after a second completed same-token challenge', async () => {
+		test('prompts and forwards a replacement only after explicit recovery of a rejected credential', async () => {
 			const tokenRef = { current: 'tok-1' };
-			const { instantiationService, agentHostService, commandService } = createTestServices(disposables, undefined, tokenAuthService(tokenRef));
-			commandService.result = { success: true, dialogSkipped: false };
-			disposables.add(instantiationService.createInstance(AgentHostContribution));
+			const services = createTestServices(disposables, undefined, tokenAuthService(tokenRef));
+			const { instantiationService, agentHostService, commandService } = services;
+			commandService.executeCommand = async <R>() => {
+				commandService.calls.push({ commandId: CHAT_SETUP_ACTION_ID, args: [] });
+				tokenRef.current = 'tok-2';
+				return { success: true, dialogSkipped: false } as R;
+			};
+			const contribution = disposables.add(instantiationService.createInstance(AgentHostContribution));
 			const sessionResource: ProtectedResourceMetadata = {
 				resource: 'https://api.github.com/session',
 				authorization_servers: ['https://github.com/login/oauth'],
 				scopes_supported: ['session:read'],
 			};
 
-			agentHostService.fireNotification(authRequiredNotification(sessionResource, AuthRequiredReason.Expired));
+			agentHostService.fireNotification(authRequiredNotification(sessionResource, AuthRequiredReason.Required));
 			await timeout(0);
 			agentHostService.fireNotification(authRequiredNotification(sessionResource, AuthRequiredReason.Expired));
 			await timeout(0);
+			assert.strictEqual(commandService.calls.length, 0);
+			assert.strictEqual(await authenticateInteractively(contribution, services, sessionResource), true);
 
 			assert.deepStrictEqual({
 				commandCalls: commandService.calls.length,
@@ -25326,7 +25345,7 @@ suite('AgentHostChatContribution', () => {
 				commandCalls: 1,
 				authenticateCalls: [
 					{ resource: 'https://api.github.com/session', scopes: ['session:read'], token: 'tok-1' },
-					{ resource: 'https://api.github.com/session', scopes: ['session:read'], token: 'tok-1' },
+					{ resource: 'https://api.github.com/session', scopes: ['session:read'], token: 'tok-2' },
 				],
 			});
 		});
@@ -25335,10 +25354,11 @@ suite('AgentHostChatContribution', () => {
 			const account = { id: 'account-1', label: 'Account 1' };
 			const exactSession = { id: 'exact-session', scopes: ['read:user'], accessToken: 'stale-token', account };
 			const broaderSession = { id: 'broader-session', scopes: ['read:user', 'repo'], accessToken: 'fresh-token', account };
+			let broaderToken = broaderSession.accessToken;
 			const authService: Partial<IAuthenticationService> = {
 				onDidChangeSessions: Event.None,
 				getOrActivateProviderIdForServer: async () => 'github',
-				getSessions: (async (_providerId: string, scopes?: ReadonlyArray<string>) => scopes ? [exactSession] : [exactSession, broaderSession]) as IAuthenticationService['getSessions'],
+				getSessions: (async (_providerId: string, scopes?: ReadonlyArray<string>) => scopes ? [exactSession] : [exactSession, { ...broaderSession, accessToken: broaderToken }]) as IAuthenticationService['getSessions'],
 			};
 			const { instantiationService, agentHostService, commandService } = createTestServices(disposables, undefined, authService);
 			disposables.add(instantiationService.createInstance(AgentHostContribution));
@@ -25351,6 +25371,9 @@ suite('AgentHostChatContribution', () => {
 			await timeout(0);
 			agentHostService.setRootState({ agents: protectedAgents(), activeSessions: 1 });
 			await timeout(0);
+			broaderToken = 'newest-token';
+			agentHostService.setRootState({ agents: protectedAgents(), activeSessions: 1 });
+			await timeout(0);
 
 			assert.deepStrictEqual({
 				commandCalls: commandService.calls.length,
@@ -25359,15 +25382,16 @@ suite('AgentHostChatContribution', () => {
 				commandCalls: 0,
 				authenticateCalls: [
 					{ resource: 'https://api.github.com', scopes: ['read:user'], token: 'stale-token' },
-					{ resource: 'https://api.github.com', scopes: ['read:user'], token: 'stale-token' },
 					{ resource: 'https://api.github.com', scopes: ['read:user'], token: 'fresh-token' },
+					{ resource: 'https://api.github.com', scopes: ['read:user'], token: 'newest-token' },
 				],
 			});
 		});
 
 		test('forwards and records the post-sign-in token when authentication repopulates the cache during setup', async () => {
 			const tokenRef = { current: 'tok-1' };
-			const { instantiationService, agentHostService, commandService } = createTestServices(disposables, undefined, tokenAuthService(tokenRef));
+			const services = createTestServices(disposables, undefined, tokenAuthService(tokenRef));
+			const { instantiationService, agentHostService, commandService } = services;
 			const contribution = disposables.add(instantiationService.createInstance(AgentHostContribution));
 			const sessionResource: ProtectedResourceMetadata = {
 				resource: 'https://api.github.com/session',
@@ -25378,19 +25402,17 @@ suite('AgentHostChatContribution', () => {
 			commandService.executeCommand = async <R>() => {
 				promptCount++;
 				tokenRef.current = 'tok-2';
-				await (contribution as unknown as { readonly _authTokenCache: AgentHostAuthTokenCache })._authTokenCache.authenticate(
-					sessionResource.resource,
-					sessionResource.scopes_supported,
-					tokenRef.current,
-					() => agentHostService.authenticate({ resource: sessionResource.resource, scopes: sessionResource.scopes_supported, token: tokenRef.current }),
-				);
+				agentHostService.fireNotification(authRequiredNotification(sessionResource, AuthRequiredReason.Required));
+				await timeout(0);
 				return { success: true, dialogSkipped: false } as R;
 			};
 
-			agentHostService.fireNotification(authRequiredNotification(sessionResource, AuthRequiredReason.Expired));
+			agentHostService.fireNotification(authRequiredNotification(sessionResource, AuthRequiredReason.Required));
 			await timeout(0);
 			agentHostService.fireNotification(authRequiredNotification(sessionResource, AuthRequiredReason.Expired));
 			await timeout(0);
+			assert.strictEqual(promptCount, 0);
+			assert.strictEqual(await authenticateInteractively(contribution, services, sessionResource), true);
 
 			assert.deepStrictEqual({
 				promptCount,
@@ -25404,9 +25426,10 @@ suite('AgentHostChatContribution', () => {
 				],
 			});
 
+			assert.strictEqual(await authenticateInteractively(contribution, services, sessionResource), true);
 			agentHostService.fireNotification(authRequiredNotification(sessionResource, AuthRequiredReason.Expired));
 			await timeout(0);
-			assert.strictEqual(promptCount, 2);
+			assert.deepStrictEqual({ promptCount, forwards: agentHostService.authenticateCalls.length }, { promptCount: 1, forwards: 3 });
 		});
 
 		test('does not prompt after a silently rotated token on a second challenge', async () => {
@@ -25419,7 +25442,7 @@ suite('AgentHostChatContribution', () => {
 				scopes_supported: ['session:read'],
 			};
 
-			agentHostService.fireNotification(authRequiredNotification(sessionResource, AuthRequiredReason.Expired));
+			agentHostService.fireNotification(authRequiredNotification(sessionResource, AuthRequiredReason.Required));
 			await timeout(0);
 			tokenRef.current = 'tok-2';
 			agentHostService.fireNotification(authRequiredNotification(sessionResource, AuthRequiredReason.Expired));
@@ -25437,19 +25460,23 @@ suite('AgentHostChatContribution', () => {
 			});
 		});
 
-		test('does not claim or retry a canceled interactive authentication until a later challenge', async () => {
+		test('does not retry canceled explicit authentication on a later notification', async () => {
 			const tokenRef = { current: 'tok-1' };
-			const { instantiationService, agentHostService, commandService } = createTestServices(disposables, undefined, tokenAuthService(tokenRef));
+			const services = createTestServices(disposables, undefined, tokenAuthService(tokenRef));
+			const { instantiationService, agentHostService, commandService } = services;
 			commandService.result = undefined;
-			disposables.add(instantiationService.createInstance(AgentHostContribution));
+			const contribution = disposables.add(instantiationService.createInstance(AgentHostContribution));
 			const sessionResource: ProtectedResourceMetadata = {
 				resource: 'https://api.github.com/session',
 				authorization_servers: ['https://github.com/login/oauth'],
 				scopes_supported: ['session:read'],
 			};
 
+			agentHostService.fireNotification(authRequiredNotification(sessionResource, AuthRequiredReason.Required));
+			await timeout(0);
 			agentHostService.fireNotification(authRequiredNotification(sessionResource, AuthRequiredReason.Expired));
 			await timeout(0);
+			assert.strictEqual(await authenticateInteractively(contribution, services, sessionResource), false);
 			agentHostService.fireNotification(authRequiredNotification(sessionResource, AuthRequiredReason.Expired));
 			await timeout(0);
 
@@ -25469,13 +25496,16 @@ suite('AgentHostChatContribution', () => {
 			agentHostService.setRootState({ agents: protectedAgents(), activeSessions: 0 });
 			await timeout(0);
 			agentHostService.authenticateCalls.length = 0;
-			tokenRef.current = 'tok-2';
 			const sessionResource: ProtectedResourceMetadata = {
 				resource: 'https://api.github.com/session',
 				authorization_servers: ['https://github.com/login/oauth'],
 				scopes_supported: ['session:read'],
 			};
 
+			agentHostService.fireNotification(authRequiredNotification(sessionResource, AuthRequiredReason.Required));
+			await timeout(0);
+			agentHostService.authenticateCalls.length = 0;
+			tokenRef.current = 'tok-2';
 			agentHostService.fireNotification(authRequiredNotification(sessionResource, AuthRequiredReason.Expired));
 			await timeout(0);
 
@@ -25510,6 +25540,11 @@ suite('AgentHostChatContribution', () => {
 				...readResource,
 				scopes_supported: ['session:write'],
 			};
+			agentHostService.fireNotification(authRequiredNotification(readResource, AuthRequiredReason.Required));
+			agentHostService.fireNotification(authRequiredNotification(writeResource, AuthRequiredReason.Required));
+			await timeout(0);
+			agentHostService.authenticateCalls.length = 0;
+			tokenRef.current = 'tok-2';
 			agentHostService.fireNotification(authRequiredNotification(readResource, AuthRequiredReason.Expired));
 			agentHostService.fireNotification(authRequiredNotification(writeResource, AuthRequiredReason.Expired));
 			await timeout(0);
@@ -25520,8 +25555,8 @@ suite('AgentHostChatContribution', () => {
 			}, {
 				commandCalls: 0,
 				authenticateCalls: [
-					{ resource: 'https://api.github.com/session', scopes: ['session:read'], token: 'tok-1' },
-					{ resource: 'https://api.github.com/session', scopes: ['session:write'], token: 'tok-1' },
+					{ resource: 'https://api.github.com/session', scopes: ['session:read'], token: 'tok-2' },
+					{ resource: 'https://api.github.com/session', scopes: ['session:write'], token: 'tok-2' },
 				],
 			});
 		});
