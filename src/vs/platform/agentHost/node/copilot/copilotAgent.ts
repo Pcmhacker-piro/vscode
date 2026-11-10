@@ -2618,6 +2618,7 @@ export class CopilotAgent extends Disposable implements IAgent {
 	getProtectedResources(reader?: IReader): ProtectedResourceMetadata[] {
 		const copilotResource = this._gitHubEndpointService.getCopilotResource();
 		return [
+			// Keep the legacy GitHub requirement until the account-choice gate is retired; default-on cleanup is separate.
 			this._entraAuthentication || this._byokModels.length > 0 ? { ...copilotResource, required: false } : copilotResource,
 			this._gitHubEndpointService.getRepoResource(),
 			...(this._entraAuthentication?.getProtectedResources(reader) ?? []),
