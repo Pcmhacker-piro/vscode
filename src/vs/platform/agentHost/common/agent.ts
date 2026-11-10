@@ -2345,8 +2345,8 @@ export interface IAgent {
 
 	// ---- Authentication and diagnostics ------------------------------------
 
-	/** Client-owned execution may require different credentials from the shared runtime. */
-	getProtectedResources(reader?: IReader, scope?: 'shared' | 'client'): ProtectedResourceMetadata[];
+	/** Advertised authentication resources; optional credentials are marked `required: false`. */
+	getProtectedResources(reader?: IReader): ProtectedResourceMetadata[];
 
 	/** Reject unauthorized delivery before providers or the canonical credential store are mutated. */
 	validateAuthentication?(params: AuthenticateParams, connectionToken?: CancellationToken): void;
