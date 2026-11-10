@@ -12,6 +12,10 @@ parameters:
   - name: VSCODE_RUN_CHECKS
     type: boolean
     default: false
+  # See product-build-linux-setup.yml
+  - name: VSCODE_WORKSPACE_IMAGE
+    type: string
+    default: none
 
 jobs:
   - job: Linux${{ parameters.VSCODE_JOB_NAME }}
@@ -56,3 +60,4 @@ jobs:
           VSCODE_QUALITY: ${{ parameters.VSCODE_QUALITY }}
           VSCODE_RUN_CHECKS: ${{ parameters.VSCODE_RUN_CHECKS }}
           VSCODE_TEST_IDS: ${{ parameters.VSCODE_TEST_IDS }}
+          VSCODE_WORKSPACE_IMAGE: ${{ parameters.VSCODE_WORKSPACE_IMAGE }}
